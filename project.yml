@@ -1,0 +1,53 @@
+name: AnvilLauncher
+options:
+  bundleIdPrefix: dev.anvil
+  deploymentTarget:
+    iOS: "16.0"
+packages:
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation
+    from: "0.9.19"
+targets:
+  AnvilLauncher:
+    type: application
+    platform: iOS
+    scheme: {}
+    sources:
+      - path: App
+        excludes: ["Resources/Bundled/**", "Native/exported_symbols.txt"]
+      - path: App/Resources/Bundled
+        type: folder
+        buildPhase: resources
+        optional: true
+    dependencies:
+      - package: ZIPFoundation
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.anvil.launcher
+        PRODUCT_NAME: Anvil
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/Anvil.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: App/Native/Anvil-Bridging-Header.h
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/deps/jni"]
+        LD_RUNPATH_SEARCH_PATHS: ["$(inherited)", "@executable_path/Frameworks"]
+        ENABLE_BITCODE: NO
+        DEAD_CODE_STRIPPING: NO
+        STRIP_STYLE: non-global
+        # libjli ищет main() через dlsym, а JVM — JNI-функции Java_dev_anvil_*: их нужно экспортировать.
+        EXPORTED_SYMBOLS_FILE: App/Native/exported_symbols.txt
+        # Иначе Release скрывает символы без явного visibility, и список экспорта их не видит.
+        GCC_SYMBOLS_PRIVATE_EXTERN: NO
+        # Debug-сборки Xcode 16 выносят main в обёртку __preview.dylib и ломают экспорт main.
+        ENABLE_DEBUG_DYLIB: NO
+    postBuildScripts:
+      - name: Embed native libraries
+        script: |
+          set -e
+          SRC="$SRCROOT/deps/Frameworks"
+          [ -d "$SRC" ] || { echo "warning: deps/Frameworks missing, run scripts/fetch-deps.sh"; exit 0; }
+          DST="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
+          mkdir -p "$DST"
+          cp -R "$SRC/." "$DST/"

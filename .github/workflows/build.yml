@@ -1,0 +1,78 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "screenshots/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            App/Resources/Bundled
+          key: anvil-deps-${{ hashFiles('scripts/fetch-deps.sh', 'Java/**') }}
+
+      - name: Tools
+        run: brew install xcodegen ldid
+
+      - name: Dependencies
+        run: ./scripts/fetch-deps.sh
+
+      - name: Build
+        run: |
+          xcodegen generate
+          xcodebuild -project AnvilLauncher.xcodeproj -scheme AnvilLauncher -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            -quiet CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+
+      - name: Check app bundle
+        run: |
+          APP=build/Build/Products/Release-iphoneos/Anvil.app
+          test -f "$APP/AnvilJIT26.js" || { echo "::error::AnvilJIT26.js не попал в приложение"; exit 1; }
+          test -f "$APP/Assets.car" || { echo "::error::Нет иконки (Assets.car)"; exit 1; }
+          nm -gU "$APP/Anvil" > exported.txt
+          for sym in _main _DeviceHasTXM _Java_dev_anvil_Bridge_nPollEvent _Java_dev_anvil_Bridge_nCreateContext; do
+            grep -q " $sym\$" exported.txt || { echo "::error::$sym не экспортирован"; exit 1; }
+          done
+
+      - name: Package IPA
+        run: |
+          rm -rf Payload && mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/Anvil.app Payload/
+          ldid -SApp/Anvil.entitlements Payload/Anvil.app/Anvil
+          zip -qry Anvil.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Anvil-ipa
+          path: Anvil.ipa
+
+      # Свежий IPA всегда лежит в релизе "latest": его можно скачать без входа в GitHub.
+      - name: Publish to release "latest"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view latest >/dev/null 2>&1 || \
+            gh release create latest --prerelease --title "Anvil (последняя сборка)" \
+              --notes "Автоматическая сборка из main. Установка: SideStore / AltStore / TrollStore."
+          gh release upload latest Anvil.ipa --clobber
+          gh release edit latest --target "$GITHUB_SHA" --notes "Сборка из ${GITHUB_SHA::7}. Установка: SideStore / AltStore / TrollStore."

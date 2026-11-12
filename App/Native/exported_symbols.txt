@@ -1,0 +1,5 @@
+_main
+__mh_execute_header
+_anvil_jli_reentry
+_DeviceHasTXM
+_Java_dev_anvil_Bridge_*

@@ -1,0 +1,77 @@
+name: Anvil simulator screenshots
+
+# Собирает Anvil для iOS Simulator и снимает основные экраны в демо-режиме (-anvilDemo <экран>).
+# JVM в симуляторе не запускается, поэтому вместо кадра игры показан фон с экранными кнопками.
+# Только вручную: минуты macOS-раннеров в приватном репозитории считаются x10.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  screenshots:
+    runs-on: macos-15
+    env:
+      PROJ: .
+      BUNDLE: dev.anvil.launcher
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build for simulator
+        working-directory: .
+        run: |
+          brew install xcodegen
+          mkdir -p deps/jni App/Resources/Bundled
+          cp "$JAVA_HOME"/include/jni.h "$JAVA_HOME"/include/darwin/jni_md.h deps/jni/
+          xcodegen generate
+          set -o pipefail
+          xcodebuild build -project AnvilLauncher.xcodeproj -scheme AnvilLauncher -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build CODE_SIGN_IDENTITY=- | tee build.log | grep -E "error:|BUILD" || true
+          grep -q "BUILD SUCCEEDED" build.log || { grep -E "error:" build.log | head -40; exit 1; }
+
+      - name: Boot simulator
+        run: |
+          RUNTIME=$(xcrun simctl list runtimes -j | jq -r '[.runtimes[] | select(.platform=="iOS" and .isAvailable)] | last | .identifier')
+          UDID=$(xcrun simctl create Anvil com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro "$RUNTIME")
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl ui "$UDID" appearance dark
+          xcrun simctl status_bar "$UDID" override --time 9:41 --batteryLevel 100 --cellularBars 4 || true
+          xcrun simctl install "$UDID" "$PROJ/build/Build/Products/Debug-iphonesimulator/Anvil.app"
+
+      - name: Screenshots
+        run: |
+          OUT="$PROJ/screenshots"
+          rm -rf "$OUT" && mkdir -p "$OUT"
+          shot() {
+            xcrun simctl terminate "$UDID" "$BUNDLE" 2>/dev/null || true
+            xcrun simctl launch "$UDID" "$BUNDLE" -anvilDemo "$2"
+            sleep "${3:-6}"
+            xcrun simctl io "$UDID" screenshot "$OUT/$1.png"
+          }
+          shot 1-instances instances
+          shot 2-instance-detail detail
+          shot 3-new-instance new 8
+          shot 4-modrinth modrinth 10
+          shot 5-accounts accounts 8
+          shot 6-settings settings
+          shot 7-jit jit
+          shot 8-game-controls game 8
+          ls -la "$OUT"
+
+      - name: Commit screenshots
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          git add "$PROJ/screenshots"
+          git commit -m "Update Anvil simulator screenshots [skip ci]" || exit 0
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin HEAD:"$GITHUB_REF_NAME"
