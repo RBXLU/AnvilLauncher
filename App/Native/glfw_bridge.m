@@ -96,21 +96,36 @@ static struct {
     EGLBoolean (*SwapInterval)(EGLDisplay, EGLint);
     void *(*GetProcAddress)(const char *);
     EGLint (*GetError)(void);
+    EGLSurface (*GetCurrentSurface)(EGLint);
 } egl;
+#define EGL_DRAW 0x3059
+#define EGL_SUCCESS 0x3000
 
 static EGLDisplay g_display;
 static EGLConfig g_config;
 static EGLSurface g_surface;
+static EGLContext g_context;
 static void *g_glLib;
+
+/// Загрузка библиотеки рендерера. MobileGlues при загрузке делает текущим свой временный
+/// pbuffer-контекст (на iOS он его не отвязывает), поэтому грузим его до создания нашего контекста.
+static void load_renderer(void) {
+    if (g_glLib) return;
+    char path[512];
+    snprintf(path, sizeof(path), "@rpath/%s", getenv("ANVIL_RENDERER") ?: "libmobileglues.dylib");
+    g_glLib = dlopen(path, RTLD_GLOBAL);
+    if (!g_glLib) fprintf(stderr, "[Anvil] %s: %s\n", path, dlerror());
+}
 
 static bool egl_init(void) {
     if (g_display) return true;
+    load_renderer();
     void *lib = dlopen("@rpath/libEGL.framework/libEGL", RTLD_GLOBAL);
     if (!lib) { fprintf(stderr, "[Anvil] libEGL: %s\n", dlerror()); return false; }
 #define LOAD(name) egl.name = dlsym(lib, "egl" #name)
     LOAD(GetDisplay); LOAD(Initialize); LOAD(BindAPI); LOAD(ChooseConfig);
     LOAD(CreateWindowSurface); LOAD(CreateContext); LOAD(MakeCurrent);
-    LOAD(SwapBuffers); LOAD(SwapInterval); LOAD(GetProcAddress); LOAD(GetError);
+    LOAD(SwapBuffers); LOAD(SwapInterval); LOAD(GetProcAddress); LOAD(GetError); LOAD(GetCurrentSurface);
 #undef LOAD
     g_display = egl.GetDisplay(NULL);
     if (!g_display || !egl.Initialize(g_display, NULL, NULL)) return false;
@@ -195,6 +210,7 @@ JNIEXPORT jlong JNICALL JNI_FN(nCreateContext)(JNIEnv *env, jclass cls, jlong sh
 JNIEXPORT void JNICALL JNI_FN(nMakeCurrent)(JNIEnv *env, jclass cls, jlong ctx) {
     if (!g_display) return;
     EGLSurface s = ctx ? g_surface : NULL;
+    g_context = (EGLContext)ctx;
     EGLBoolean ok = egl.MakeCurrent(g_display, s, s, (EGLContext)ctx);
     fprintf(stderr, "[Anvil] eglMakeCurrent(ctx=%p, surface=%p) -> %d (0x%x)\n", (void *)ctx, s, ok, egl.GetError());
 }
@@ -205,10 +221,18 @@ JNIEXPORT void JNICALL JNI_FN(nSwapBuffers)(JNIEnv *env, jclass cls) {
         if (frames++ < 3) fprintf(stderr, "[Anvil] SwapBuffers без поверхности\n");
         return;
     }
+    // Подстраховка: если кто-то перепривязал поток к своему контексту, возвращаем наш.
+    if (g_context && egl.GetCurrentSurface && egl.GetCurrentSurface(EGL_DRAW) != g_surface) {
+        static int rebinds;
+        if (rebinds++ < 5) fprintf(stderr, "[Anvil] Чужой текущий контекст, возвращаем свой\n");
+        egl.MakeCurrent(g_display, g_surface, g_surface, g_context);
+    }
     EGLBoolean ok = egl.SwapBuffers(g_display, g_surface);
-    // Первые кадры и каждый 600-й пишем в лог, чтобы видеть, доходит ли картинка до экрана.
-    if (frames < 3 || frames % 600 == 0 || !ok) {
-        fprintf(stderr, "[Anvil] eglSwapBuffers #%d -> %d (0x%x)\n", frames, ok, egl.GetError());
+    EGLint error = egl.GetError();
+    // Первые кадры, каждый 600-й и первые ошибки пишем в лог, но не на каждом кадре.
+    static int failures;
+    if (frames < 3 || frames % 600 == 0 || (!ok && failures++ < 5)) {
+        fprintf(stderr, "[Anvil] eglSwapBuffers #%d -> %d (0x%x)\n", frames, ok, error);
         if (frames == 0) log_layer("first swap");
     }
     frames++;
@@ -220,11 +244,7 @@ JNIEXPORT void JNICALL JNI_FN(nSwapInterval)(JNIEnv *env, jclass cls, jint inter
 
 JNIEXPORT jlong JNICALL JNI_FN(nGetProcAddress)(JNIEnv *env, jclass cls, jstring jname) {
     const char *name = (*env)->GetStringUTFChars(env, jname, NULL);
-    if (!g_glLib) {
-        char path[512];
-        snprintf(path, sizeof(path), "@rpath/%s", getenv("ANVIL_RENDERER") ?: "libmobileglues.dylib");
-        g_glLib = dlopen(path, RTLD_GLOBAL);
-    }
+    load_renderer();
     void *fn = g_glLib ? dlsym(g_glLib, name) : NULL;
     if (!fn && egl.GetProcAddress) fn = egl.GetProcAddress(name);
     (*env)->ReleaseStringUTFChars(env, jname, name);
