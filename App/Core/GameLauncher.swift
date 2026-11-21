@@ -69,6 +69,7 @@ enum GameLauncher {
         let renderer = (instance.renderer ?? settings.renderer).library(for: info)
         let gameDir = instance.directory
         try FileManager.default.createDirectory(at: gameDir, withIntermediateDirectories: true)
+        writeMobileDefaults(to: gameDir)
 
         let legacyLWJGL = VersionManager.usesLegacyLWJGL(info)
         let lwjglJars = ((try? FileManager.default.contentsOfDirectory(atPath: Paths.lwjgl.path)) ?? [])
@@ -146,6 +147,19 @@ enum GameLauncher {
         // У современных версий --width/--height уже приходят через has_custom_resolution.
         let size = info.arguments == nil ? ["--width", values["resolution_width"]!, "--height", values["resolution_height"]!] : []
         return jvm + [info.mainClass ?? "net.minecraft.client.main.Main"] + game.map(substitute) + size
+    }
+
+    /// Стартовые настройки игры для телефона. Пишутся только в новую сборку: свои настройки игрока не трогаем.
+    /// Неизвестные ключи старые версии просто пропускают.
+    static func writeMobileDefaults(to gameDir: URL) {
+        let file = gameDir.appending(path: "options.txt")
+        guard !FileManager.default.fileExists(atPath: file.path) else { return }
+        let options = [
+            "renderDistance:6", "simulationDistance:5", "graphicsMode:0", "fancyGraphics:false",
+            "entityShadows:false", "particles:1", "mipmapLevels:0", "biomeBlendRadius:0",
+            "ao:false", "maxFps:60", "enableVsync:true", "prioritizeChunkUpdates:0", "onboardAccessibility:false",
+        ]
+        try? (options.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
     }
 
     static func installerArguments(_ jar: URL) throws -> [String] {

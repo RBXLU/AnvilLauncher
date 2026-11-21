@@ -5,7 +5,42 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dispatch/dispatch.h>
+#include <mach/mach.h>
+#include <os/proc.h>
 #include "anvil_native.h"
+
+// ---------- Слежение за памятью: iOS молча убивает процесс, когда он превышает лимит ----------
+
+static unsigned long long footprint_mb(void) {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) return 0;
+    return info.phys_footprint >> 20;
+}
+
+static void log_memory(const char *reason) {
+    // os_proc_available_memory — сколько ещё можно занять до принудительного завершения.
+    fprintf(stderr, "[Anvil] Память (%s): занято %llu МБ, до лимита iOS %llu МБ\n",
+            reason, footprint_mb(), (unsigned long long)(os_proc_available_memory() >> 20));
+}
+
+static void start_memory_monitor(void) {
+    static dispatch_source_t timer, pressure;
+    dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+    timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0), 10 * NSEC_PER_SEC, NSEC_PER_SEC);
+    dispatch_source_set_event_handler(timer, ^{ log_memory("каждые 10 с"); });
+    dispatch_resume(timer);
+
+    pressure = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
+                                      DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL, queue);
+    dispatch_source_set_event_handler(pressure, ^{
+        unsigned long flags = dispatch_source_get_data(pressure);
+        log_memory(flags & DISPATCH_MEMORYPRESSURE_CRITICAL ? "КРИТИЧЕСКАЯ нехватка" : "предупреждение iOS");
+    });
+    dispatch_resume(pressure);
+}
 
 typedef int JLI_Launch_t(int argc, char **argv, int jargc, const char **jargv,
                          int appclassc, const char **appclassv,
@@ -74,6 +109,7 @@ int anvil_launch_jvm(int argc, const char *const *argv, const char *logPath) {
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 8 << 20);
     pthread_t thread;
+    start_memory_monitor();
     int rc = pthread_create(&thread, &attr, jvm_thread, NULL);
     pthread_attr_destroy(&attr);
     if (rc == 0) pthread_detach(thread);
